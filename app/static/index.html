@@ -1,0 +1,448 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voice-to-Text Reader</title>
+<link rel="icon" href="data:,">
+<style>
+:root{--bg:#f6f7f9;--panel:#fff;--ink:#16181d;--muted:#5d6472;--line:#e3e6eb;--accent:#2f6fed;--accent-ink:#fff;
+--ok:#1f9d55;--warn:#c27c0e;--bad:#d64545;--chip:#eef2fb;--hl:#fff3b0;--mono:ui-monospace,SFMono-Regular,Consolas,monospace}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1115;--panel:#171a21;--ink:#e7e9ee;--muted:#9aa2b1;--line:#2a2f3a;
+--accent:#5b8cff;--chip:#1f2533;--hl:#5a4b10}}
+*{box-sizing:border-box}
+body{margin:0;font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;background:var(--bg);color:var(--ink)}
+header{display:flex;align-items:center;gap:12px;padding:10px 18px;border-bottom:1px solid var(--line);background:var(--panel);position:sticky;top:0;z-index:5}
+header h1{font-size:16px;margin:0;font-weight:650;letter-spacing:.2px}
+.pill{font-size:12px;padding:2px 8px;border-radius:99px;background:var(--chip);color:var(--muted)}
+.pill.on{color:var(--ok)}.pill.off{color:var(--warn)}
+.layout{display:grid;grid-template-columns:320px 1fr;min-height:calc(100vh - 49px)}
+aside{border-right:1px solid var(--line);background:var(--panel);padding:16px;display:flex;flex-direction:column;gap:16px;overflow:auto}
+main{padding:18px;min-width:0}
+h2{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0 0 8px}
+h3{font-size:14px;margin:0 0 8px}
+label{display:block;font-size:12px;color:var(--muted);margin:8px 0 3px}
+input[type=text],input[type=url],select{width:100%;padding:7px 9px;border:1px solid var(--line);border-radius:7px;background:var(--bg);color:var(--ink);font:inherit}
+.check{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--ink);margin:6px 0}
+button{font:inherit;border:1px solid var(--line);background:var(--panel);color:var(--ink);padding:6px 12px;border-radius:7px;cursor:pointer}
+button:hover{border-color:var(--accent)}
+button.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent);font-weight:600}
+button:disabled{opacity:.5;cursor:default}
+.seg-tabs,.tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin-bottom:12px;flex-wrap:wrap}
+.seg-tabs button,.tabs button{border:0;border-bottom:2px solid transparent;border-radius:0;background:none;padding:7px 10px;color:var(--muted)}
+.seg-tabs button.active,.tabs button.active{color:var(--ink);border-bottom-color:var(--accent)}
+.drop{border:1.5px dashed var(--line);border-radius:10px;padding:18px;text-align:center;color:var(--muted);cursor:pointer}
+.drop.over{border-color:var(--accent);color:var(--accent)}
+.history{list-style:none;margin:0;padding:0}
+.history li{padding:7px 8px;border-radius:7px;cursor:pointer;display:flex;gap:8px;align-items:center}
+.history li:hover,.history li.sel{background:var(--chip)}
+.history .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px}
+.dot{width:8px;height:8px;border-radius:50%;flex:none;background:var(--muted)}
+.dot.done{background:var(--ok)}.dot.failed{background:var(--bad)}.dot.running,.dot.queued{background:var(--warn)}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;margin-bottom:14px}
+.top{display:grid;grid-template-columns:minmax(0,1fr) minmax(280px,420px);gap:14px;align-items:start}
+video{width:100%;border-radius:8px;background:#000;max-height:260px}
+.stages{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:8px}
+.stage{font-size:12px}.stage .row{display:flex;justify-content:space-between;color:var(--muted)}
+.bar{height:6px;background:var(--line);border-radius:4px;overflow:hidden;margin-top:3px}
+.bar i{display:block;height:100%;background:var(--accent);transition:width .3s}
+.stage.done .bar i{background:var(--ok)}.stage.failed .bar i{background:var(--bad)}.stage.skipped .bar i{background:var(--muted)}
+.toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
+.toolbar input[type=text]{width:200px}
+.toolbar select{width:auto}
+.segs{max-height:62vh;overflow:auto;border:1px solid var(--line);border-radius:8px}
+.seg{display:grid;grid-template-columns:70px 1fr;gap:10px;padding:7px 10px;border-bottom:1px solid var(--line)}
+.seg:last-child{border-bottom:0}
+.seg.low{background:color-mix(in srgb,var(--warn) 8%,transparent)}
+.seg.playing{background:color-mix(in srgb,var(--accent) 12%,transparent)}
+.ts{font:12px var(--mono);color:var(--accent);background:none;border:0;padding:2px 0;text-align:left;cursor:pointer}
+.txt{outline:none;white-space:pre-wrap;border-radius:4px;padding:1px 3px}
+.txt:focus{box-shadow:0 0 0 2px var(--accent)}
+.txt.changed{border-left:3px solid var(--ok);padding-left:6px}
+mark{background:var(--hl);color:inherit}
+.sugg{grid-column:2;font-size:12px;color:var(--muted);display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.sugg b{color:var(--ink);font-weight:500}
+.sugg button{padding:1px 8px;font-size:12px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
+.tile{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+.tile .k{font-size:12px;color:var(--muted)}.tile .v{font-size:22px;font-weight:650;font-variant-numeric:tabular-nums}
+.tile .s{font-size:11px;color:var(--muted)}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chip{background:var(--chip);border-radius:99px;padding:2px 10px;font-size:12px}
+.kw{display:grid;grid-template-columns:120px 1fr 36px;gap:8px;align-items:center;font-size:13px;margin:3px 0}
+.kw .bar{margin:0;height:8px}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.warn{color:var(--warn)}.bad{color:var(--bad)}.ok{color:var(--ok)}.muted{color:var(--muted)}
+.score{font-size:40px;font-weight:700;font-variant-numeric:tabular-nums}
+.timeline{position:relative;height:28px;background:var(--line);border-radius:6px;margin:8px 0;cursor:pointer}
+.timeline span{position:absolute;top:0;bottom:0;width:2px;background:var(--accent)}
+.timeline .sil{background:color-mix(in srgb,var(--muted) 45%,transparent);width:auto}
+.frames{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}
+.frames figure{margin:0;background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.frames img{width:100%;display:block;cursor:pointer}
+.frames figcaption{padding:8px 10px;font-size:12px}
+.ocr{font:12px var(--mono);white-space:pre-wrap;background:var(--bg);padding:6px;border-radius:6px;margin-top:4px}
+table{border-collapse:collapse;width:100%;font-size:13px}td{padding:5px 6px;border-bottom:1px solid var(--line)}td:first-child{color:var(--muted);width:40%}
+.empty{color:var(--muted);text-align:center;padding:60px 20px}
+.err{background:color-mix(in srgb,var(--bad) 12%,transparent);color:var(--bad);border-radius:8px;padding:10px 12px;margin-bottom:12px}
+.toast{position:fixed;bottom:18px;right:18px;background:var(--ink);color:var(--bg);padding:8px 14px;border-radius:8px;opacity:0;transition:opacity .2s;pointer-events:none}
+.toast.show{opacity:.92}
+@media (max-width:900px){.layout{grid-template-columns:1fr}.top,.two{grid-template-columns:1fr}aside{border-right:0;border-bottom:1px solid var(--line)}}
+</style>
+</head>
+<body>
+<header>
+  <h1>Voice-to-Text Reader</h1>
+  <span class="pill" id="gpuPill">…</span>
+  <span class="pill" id="aiPill">…</span>
+</header>
+<div class="layout">
+<aside>
+  <section>
+    <h2>New scan</h2>
+    <div class="seg-tabs" id="srcTabs"><button class="active" data-src="file">File</button><button data-src="url">URL</button></div>
+    <div id="srcFile">
+      <div class="drop" id="drop" tabindex="0" role="button">Drop a video or audio file here<br><small>or click to choose</small></div>
+      <input type="file" id="file" accept="video/*,audio/*,.mkv,.webm,.flv" hidden>
+    </div>
+    <div id="srcUrl" hidden>
+      <label for="url">Video page or media URL</label>
+      <input type="url" id="url" placeholder="https://…">
+    </div>
+    <label for="model">Speech model</label>
+    <select id="model"></select>
+    <label for="lang">Spoken language (blank = auto-detect)</label>
+    <input type="text" id="lang" placeholder="auto  ·  e.g. en, es, ja" maxlength="3">
+    <label for="tr">Translate to (blank = none)</label>
+    <input type="text" id="tr" list="langs" placeholder="e.g. English, Spanish, Japanese">
+    <datalist id="langs"><option>English<option>Spanish<option>French<option>German<option>Portuguese<option>Italian<option>Japanese<option>Korean<option>Chinese (Simplified)<option>Arabic<option>Hindi<option>Russian</datalist>
+    <label class="check"><input type="checkbox" id="useAi" checked> AI language &amp; cohesion review, categories</label>
+    <label class="check"><input type="checkbox" id="ocr" checked> Read on-screen text (AI vision)</label>
+    <button class="primary" id="go" style="width:100%;margin-top:8px">Scan &amp; transcribe</button>
+    <div id="formErr" class="bad" style="font-size:12px;margin-top:6px"></div>
+  </section>
+  <section>
+    <h2>History</h2>
+    <ul class="history" id="history"></ul>
+  </section>
+</aside>
+<main id="main"><div class="empty">Choose a file or paste a URL, then press <b>Scan &amp; transcribe</b>.<br>Speech, picture and sound are scanned in parallel.</div></main>
+</div>
+<div class="toast" id="toast" role="status"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const STAGE_NAMES = {acquire:"Acquire",probe:"Probe media",transcribe:"Speech → text",visual_scan:"Video scan",
+  audio_scan:"Audio scan",screen_text:"On-screen text",text_analysis:"Text analysis",ai_review:"AI review",translate:"Translate"};
+let CFG = {}, current = null, poll = null, tab = "transcript", segs = {transcript: [], translation: []}, dirty = {};
+let pickedFile = null, srcMode = "file";
+
+// DOM builder: text is always set as textContent, never parsed as HTML.
+function h(tag, attrs = {}, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v == null || v === false) continue;
+    if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else if (k === "style") el.style.cssText = v;
+    else el.setAttribute(k === "cls" ? "class" : k, v === true ? "" : v);
+  }
+  for (const c of kids.flat()) if (c != null && c !== false) el.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  return el;
+}
+const ts = s => { s = Math.max(0, s || 0); const hh = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), ss = Math.floor(s % 60);
+  return (hh ? hh + ":" + String(m).padStart(2, "0") : String(m).padStart(2, "0")) + ":" + String(ss).padStart(2, "0"); };
+const toast = msg => { const t = $("#toast"); t.textContent = msg; t.classList.add("show"); setTimeout(() => t.classList.remove("show"), 2200); };
+const api = async (path, opts) => { const r = await fetch(path, opts); if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText); return r; };
+
+async function init() {
+  CFG = await (await api("/api/config")).json();
+  $("#gpuPill").textContent = CFG.cuda ? "GPU · CUDA" : "CPU";
+  $("#gpuPill").className = "pill " + (CFG.cuda ? "on" : "off");
+  $("#aiPill").textContent = CFG.ai ? "AI · " + CFG.ai_model : "AI layer off (no API key)";
+  $("#aiPill").className = "pill " + (CFG.ai ? "on" : "off");
+  for (const m of CFG.models) $("#model").append(h("option", {value: m, selected: m === CFG.default_model}, m + (m === CFG.default_model ? " (default)" : "")));
+  if (!CFG.ai) { $("#useAi").checked = $("#ocr").checked = false; }
+  loadHistory();
+  const id = location.hash.slice(1); if (id) openJob(id);
+}
+
+// ---------- form ----------
+document.querySelectorAll("#srcTabs button").forEach(b => b.onclick = () => {
+  srcMode = b.dataset.src; document.querySelectorAll("#srcTabs button").forEach(x => x.classList.toggle("active", x === b));
+  $("#srcFile").hidden = srcMode !== "file"; $("#srcUrl").hidden = srcMode !== "url";
+});
+const drop = $("#drop");
+drop.onclick = () => $("#file").click();
+drop.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); $("#file").click(); } };
+$("#file").onchange = e => pick(e.target.files[0]);
+drop.ondragover = e => { e.preventDefault(); drop.classList.add("over"); };
+drop.ondragleave = () => drop.classList.remove("over");
+drop.ondrop = e => { e.preventDefault(); drop.classList.remove("over"); pick(e.dataTransfer.files[0]); };
+function pick(f) { if (!f) return; pickedFile = f; drop.textContent = f.name + " · " + (f.size / 1e6).toFixed(1) + " MB"; }
+
+$("#go").onclick = async () => {
+  $("#formErr").textContent = "";
+  const fd = new FormData();
+  if (srcMode === "file") { if (!pickedFile) return $("#formErr").textContent = "Choose a file first."; fd.append("file", pickedFile); }
+  else { const u = $("#url").value.trim(); if (!/^https?:\/\//i.test(u)) return $("#formErr").textContent = "Enter an http(s) URL."; fd.append("url", u); }
+  fd.append("model", $("#model").value); fd.append("language", $("#lang").value.trim().toLowerCase());
+  fd.append("translate_to", $("#tr").value.trim()); fd.append("use_ai", $("#useAi").checked); fd.append("ocr", $("#ocr").checked);
+  $("#go").disabled = true; $("#go").textContent = srcMode === "file" ? "Uploading…" : "Starting…";
+  try { const {id} = await (await api("/api/jobs", {method: "POST", body: fd})).json(); openJob(id); }
+  catch (e) { $("#formErr").textContent = e.message; }
+  finally { $("#go").disabled = false; $("#go").textContent = "Scan & transcribe"; }
+};
+
+async function loadHistory() {
+  const items = await (await api("/api/jobs")).json();
+  $("#history").replaceChildren(...items.map(j => h("li", {cls: current && current.id === j.id ? "sel" : "", onclick: () => openJob(j.id), title: j.name},
+    h("span", {cls: "dot " + j.status}), h("span", {cls: "nm"}, j.name), h("small", {cls: "muted"}, new Date(j.created * 1000).toLocaleDateString()))));
+}
+
+// ---------- job view ----------
+let gen = 0, failures = 0, stalePane = false;  // gen: one poll loop per opened job, stale replies are dropped
+async function openJob(id) {
+  if (current && current.id === id) return;  // already open: keep edits and the running poll loop
+  if (current && Object.values(dirty).some(Boolean) && !window.confirm("You have unsaved transcript edits. Leave anyway?")) return;
+  clearTimeout(poll);
+  location.hash = id; dirty = {}; tab = "transcript";
+  current = {id}; await refresh(true, ++gen);
+}
+
+async function refresh(first, g) {
+  const id = current.id;
+  let job;
+  try { job = await (await api("/api/jobs/" + id)).json(); failures = 0; }
+  catch (e) {
+    if (g !== gen) return;
+    if (first || ++failures > 5) { $("#main").replaceChildren(h("div", {cls: "err"}, e.message)); return; }
+    poll = setTimeout(() => refresh(false, g), 2000); return;  // transient: server busy or restarting
+  }
+  if (g !== gen) return;
+  const wasActive = current.status === "running" || current.status === "queued";
+  const active = job.status === "running" || job.status === "queued";
+  const before = current.result || {};
+  current = job;
+  const r = job.result;
+  // Re-render only when new results land, so a user reading/editing isn't interrupted by progress ticks.
+  const changed = first || !active || stalePane || ["transcript", "stats", "review", "translation", "visual", "audio", "screen_text", "media"].some(k => !!before[k] !== !!r[k]);
+  if (changed) {
+    if (!dirty.transcript) segs.transcript = clone(r.transcript_edited || (r.transcript && r.transcript.segments) || []);
+    if (!dirty.translation) segs.translation = clone(r.translation_edited || (r.translation && r.translation.segments) || []);
+    render();
+  } else renderStages();
+  if (active) poll = setTimeout(() => refresh(false, g), 1000);
+  if (first || (wasActive && !active)) loadHistory();
+}
+const clone = a => a.map(s => ({start: s.start, end: s.end, text: s.text, avg_logprob: s.avg_logprob, untranslated: s.untranslated}));
+
+// The shell (head, player, tabs, pane) is built once per job; later renders update parts in place, so the video
+// keeps playing and a pane the user is typing in is left alone until they leave it.
+function render(forcePane) {
+  const j = current, r = j.result, page = (r.source && r.source.page) || {};
+  const title = page.title || j.name;
+  let shell = $("#main").firstElementChild;
+  if (!shell || shell.dataset.job !== j.id) {
+    shell = h("div", {"data-job": j.id}, h("div", {cls: "top"}, h("div", {id: "head"}), h("div", {id: "playerBox"})), h("div", {id: "tabbar"}),
+      h("div", {id: "pane", onfocusout: () => setTimeout(() => { if (stalePane && !$("#pane").contains(document.activeElement)) render(true); }, 300)}));
+    $("#main").replaceChildren(shell);
+  }
+  const head = h("div", {cls: "card"},
+    h("h3", {}, title),
+    h("div", {cls: "muted", style: "font-size:12px;margin-bottom:10px"},
+      [j.status.toUpperCase(), r.media && ts(r.media.duration), r.transcript && ("language: " + r.transcript.language + " (" + Math.round(r.transcript.language_probability * 100) + "%)"),
+       r.options && ("model: " + r.options.model)].filter(Boolean).join("  ·  ")),
+    j.error ? h("div", {cls: "err"}, j.error) : null,
+    h("div", {cls: "stages", id: "stages"}));
+  $("#head").replaceChildren(head);
+  if (!$("#player") && r.source && r.source.file) {
+    const player = h("video", {id: "player", controls: true, preload: "metadata", src: "/api/jobs/" + j.id + "/media"});
+    player.ontimeupdate = () => markPlaying(player.currentTime);
+    $("#playerBox").replaceChildren(h("div", {cls: "card"}, player));
+  }
+  const tabs = [["transcript", "Transcript"], ["translation", "Translation"], ["review", "AI review"], ["text", "Text analysis"], ["video", "Video analysis"], ["screen", "On-screen text"]];
+  $("#tabbar").replaceChildren(h("div", {cls: "tabs", role: "tablist"}, tabs.map(([k, label]) => h("button", {cls: tab === k ? "active" : "", role: "tab", "aria-selected": String(tab === k), onclick: () => { tab = k; render(true); }}, label))));
+  const box = $("#pane");
+  if (forcePane || !box.contains(document.activeElement)) { box.replaceChildren(pane()); stalePane = false; }
+  else stalePane = true;
+  renderStages();
+}
+
+function renderStages() {
+  const box = $("#stages"); if (!box) return;
+  const st = current.stages || {};
+  box.replaceChildren(...Object.keys(STAGE_NAMES).filter(k => st[k]).map(k => {
+    const s = st[k], pct = Math.round((s.progress || 0) * 100);
+    return h("div", {cls: "stage " + s.status}, h("div", {cls: "row"}, h("span", {}, STAGE_NAMES[k]), h("span", {}, s.status === "running" ? pct + "%" : s.status)),
+      h("div", {cls: "bar"}, h("i", {style: "width:" + (s.status === "skipped" ? 100 : pct) + "%"})), s.note ? h("small", {cls: "muted"}, s.note) : null);
+  }));
+  if (!Object.keys(st).length) box.append(h("span", {cls: "muted"}, "Waiting in queue…"));
+}
+
+function seek(t) { const p = $("#player"); if (p) { p.currentTime = t; p.play().catch(() => {}); } }
+function markPlaying(t) {
+  document.querySelectorAll(".seg.playing").forEach(e => e.classList.remove("playing"));
+  const list = segs[tab]; if (!list) return;
+  const i = list.findIndex(s => t >= s.start && t < s.end); if (i < 0) return;
+  const el = document.querySelector(`.seg[data-i="${i}"]`); if (el) el.classList.add("playing");
+}
+
+function pane() {
+  const r = current.result, active = current.status === "running" || current.status === "queued";
+  if (tab === "transcript" || tab === "translation") return editor(tab);
+  if (tab === "review") return reviewPane(r);
+  if (tab === "text") return r.stats ? textPane(r.stats) : h("div", {cls: "empty"}, active ? "Analysing…" : "No text analysis.");
+  if (tab === "video") return videoPane(r);
+  return screenPane(r);
+}
+
+// ---------- editor ----------
+function editor(kind) {
+  const r = current.result, list = segs[kind];
+  if (!list.length) {
+    const err = kind === "translation" ? r.translation_error || (r.options && !r.options.translate_to ? "No translation requested for this job." : null) : null;
+    return h("div", {cls: "empty"}, err || (current.status === "done" ? "No speech found." : current.status === "failed" ? "Job failed." : "Working…"));
+  }
+  const raw = kind === "transcript" ? (r.transcript || {}).segments || [] : (r.translation || {}).segments || [];
+  const corrections = kind === "transcript" && r.review ? Object.fromEntries(r.review.corrections.map(c => [c.index, c])) : {};
+  const low = new Set(kind === "transcript" && r.stats ? r.stats.low_confidence_segments : []);
+  const search = h("input", {type: "text", placeholder: "Search…", "aria-label": "Search transcript"});
+  const onlyLow = h("input", {type: "checkbox"});
+  const fmt = h("select", {"aria-label": "Export format"}, ["txt", "srt", "vtt", "md", "json"].map(f => h("option", {value: f}, f.toUpperCase())));
+  const box = h("div", {cls: "segs"});
+  const draw = () => {
+    const q = search.value.trim().toLowerCase();
+    box.replaceChildren(...list.map((s, i) => {
+      if (onlyLow.checked && !low.has(i)) return null;
+      if (q && !s.text.toLowerCase().includes(q)) return null;
+      const txt = h("div", {cls: "txt", contenteditable: "plaintext-only", spellcheck: "true", "aria-label": "Segment " + (i + 1)});
+      if (q) highlight(txt, s.text, q); else txt.textContent = s.text;
+      const orig = raw[i] && raw[i].text;
+      if (orig != null && orig !== s.text) txt.classList.add("changed");
+      txt.oninput = () => { s.text = txt.innerText.replace(/\n+$/, ""); dirty[kind] = true; txt.classList.toggle("changed", s.text !== orig); };
+      const c = corrections[i];
+      return h("div", {cls: "seg" + (low.has(i) ? " low" : ""), "data-i": i},
+        h("button", {cls: "ts", onclick: () => seek(s.start), title: "Play from here"}, ts(s.start)), txt,
+        low.has(i) ? h("div", {cls: "sugg warn"}, "Low recognition confidence: check this line") : null,
+        s.untranslated ? h("div", {cls: "sugg warn"}, "Not translated by AI: original text kept") : null,
+        c && c.corrected !== s.text ? h("div", {cls: "sugg"}, "AI suggests:", h("b", {}, c.corrected), h("span", {}, "(" + c.reason + ")"),
+          h("button", {onclick: () => { s.text = c.corrected; dirty[kind] = true; draw(); }}, "Apply")) : null);
+    }).filter(Boolean));
+  };
+  search.oninput = draw; onlyLow.onchange = draw; draw();
+  const nCorr = Object.keys(corrections).length;
+  return h("div", {cls: "card"},
+    h("div", {cls: "toolbar"}, search,
+      low.size ? h("label", {cls: "check", style: "margin:0"}, onlyLow, `Low confidence only (${low.size})`) : null,
+      nCorr ? h("button", {onclick: () => { if (!window.confirm(`Replace ${nCorr} lines with the AI's suggestions? This overwrites any manual edits on those lines.`)) return; for (const c of Object.values(corrections)) list[c.index].text = c.corrected; dirty[kind] = true; draw(); toast(nCorr + " AI corrections applied: review, then Save"); }}, `Apply all AI corrections (${nCorr})`) : null,
+      h("span", {style: "flex:1"}), fmt,
+      h("button", {onclick: () => doExport(kind, fmt.value, false)}, "Download"),
+      h("button", {cls: "primary", onclick: () => doExport(kind, fmt.value, true)}, "Save edits"),
+      h("button", {onclick: () => navigator.clipboard.writeText(list.map(s => s.text).join("\n")).then(() => toast("Copied"))}, "Copy")),
+    h("div", {cls: "muted", style: "font-size:12px;margin-bottom:8px"}, `${list.length} segments · click any line to edit · click a time to play. Raw output is kept; saved edits are stored beside it.`),
+    box);
+}
+function highlight(el, text, q) {
+  let i = 0; const lo = text.toLowerCase();
+  for (let k; (k = lo.indexOf(q, i)) >= 0; i = k + q.length) el.append(text.slice(i, k), h("mark", {}, text.slice(k, k + q.length)));
+  el.append(text.slice(i));
+}
+async function doExport(kind, fmt, save) {
+  try {
+    const res = await api(`/api/jobs/${current.id}/export`, {method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({fmt, kind, save, segments: segs[kind].map(s => ({start: s.start, end: s.end, text: s.text}))})});
+    if (save) { dirty[kind] = false; current.result[kind + "_edited"] = clone(segs[kind]); toast("Saved to outputs/" + current.id + "/" + kind + "_edited." + fmt); }
+    const blob = await res.blob(), a = h("a", {href: URL.createObjectURL(blob), download: `${kind}-${current.id}.${fmt}`});
+    document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  } catch (e) { toast("Export failed: " + e.message); }
+}
+
+// ---------- analysis panes ----------
+const tile = (k, v, s) => h("div", {cls: "tile"}, h("div", {cls: "k"}, k), h("div", {cls: "v"}, v == null ? "–" : v), s ? h("div", {cls: "s"}, s) : null);
+const chips = arr => arr && arr.length ? h("div", {cls: "chips"}, arr.map(x => h("span", {cls: "chip"}, x))) : h("span", {cls: "muted"}, "none");
+const bullets = arr => arr && arr.length ? h("ul", {style: "margin:0;padding-left:18px"}, arr.map(x => h("li", {}, x))) : h("span", {cls: "muted"}, "none");
+const row = (k, v) => h("tr", {}, h("td", {}, k), h("td", {}, v == null || v === "" ? "–" : String(v)));
+
+function reviewPane(r) {
+  const v = r.review;
+  if (!v) return h("div", {cls: "empty"}, r.review_error || (current.status === "done" ? "AI review was not run for this job." : "Waiting for the transcript…"));
+  const t = r.transcript, mism = v.language_mismatch;
+  const cls = v.cohesion_score >= 80 ? "ok" : v.cohesion_score >= 55 ? "warn" : "bad";
+  return h("div", {},
+    h("div", {cls: "two"},
+      h("div", {cls: "card"}, h("h3", {}, "Language verification"),
+        h("table", {}, row("Speech recogniser", `${t.language} (${Math.round(t.language_probability * 100)}% confident)`),
+          row("AI reading of the text", `${v.primary_language_code} · ${v.primary_language_name}`),
+          row("Other languages heard", v.other_languages.join(", ") || "none"),
+          h("tr", {}, h("td", {}, "Verdict"), h("td", {cls: mism ? "bad" : "ok"}, mism ? "Mismatch: re-run with the language set explicitly" : "Agree"))),
+        v.language_notes ? h("p", {cls: "muted"}, v.language_notes) : null),
+      h("div", {cls: "card"}, h("h3", {}, "Text cohesion"), h("div", {cls: "score " + cls}, v.cohesion_score, h("small", {cls: "muted", style: "font-size:14px"}, " / 100")),
+        h("p", {}, v.cohesion_notes), h("p", {cls: "muted"}, `${v.corrections.length} suggested corrections: apply them in the Transcript tab.`))),
+    h("div", {cls: "card"}, h("h3", {}, "Summary"), h("p", {}, v.summary),
+      h("table", {}, row("Category", v.category), row("Content type", v.content_type), row("Sentiment / tone", v.sentiment + " · " + v.tone), row("Audience", v.audience)),
+      h("h3", {style: "margin-top:12px"}, "Topics"), chips(v.topics)),
+    h("div", {cls: "two"},
+      h("div", {cls: "card"}, h("h3", {}, "Chapters"), v.chapters.length ? h("div", {}, v.chapters.map(c => h("div", {}, h("button", {cls: "ts", onclick: () => seek(c.start)}, ts(c.start)), " ", c.title))) : h("span", {cls: "muted"}, "none")),
+      h("div", {cls: "card"}, h("h3", {}, "Named entities"), chips(v.entities.map(e => e.text + " · " + e.type)))),
+    h("div", {cls: "two"}, h("div", {cls: "card"}, h("h3", {}, "Key quotes"), bullets(v.key_quotes.map(q => "“" + q + "”"))),
+      h("div", {cls: "card"}, h("h3", {}, "Action items"), bullets(v.action_items))));
+}
+
+function textPane(s) {
+  const max = s.top_keywords.length ? s.top_keywords[0][1] : 1;
+  const fill = Object.entries(s.filler_words).sort((a, b) => b[1] - a[1]);
+  const nFill = fill.reduce((a, [, c]) => a + c, 0);
+  return h("div", {},
+    h("div", {cls: "grid", style: "margin-bottom:14px"},
+      tile("Words", s.word_count), tile("Unique words", s.unique_words, "diversity " + s.lexical_diversity),
+      tile("Speaking rate", s.wpm, "words / minute"), tile("Speech span", ts(s.speaking_seconds), Math.round(s.speech_ratio * 100) + "% of runtime inside speech segments"),
+      tile("Sentences", s.sentence_count, s.avg_sentence_words + " words avg"), tile("Reading ease", s.flesch_reading_ease, "Flesch (English)"),
+      tile("Grade level", s.fk_grade, "Flesch-Kincaid"), tile("Avg confidence", s.avg_confidence == null ? null : Math.round(s.avg_confidence * 100) + "%", s.low_confidence_segments.length + " low-confidence lines"),
+      tile("Filler words", nFill, s.word_count ? (nFill / s.word_count * 100).toFixed(1) + "% of words" : "")),
+    h("div", {cls: "two"},
+      h("div", {cls: "card"}, h("h3", {}, "Top keywords"), s.top_keywords.length ? s.top_keywords.map(([w, c]) => h("div", {cls: "kw"}, h("span", {}, w), h("div", {cls: "bar"}, h("i", {style: `width:${c / max * 100}%`})), h("span", {cls: "muted"}, c))) : h("span", {cls: "muted"}, "none")),
+      h("div", {},
+        h("div", {cls: "card"}, h("h3", {}, "Filler words"), chips(fill.map(([w, c]) => `${w} × ${c}`))),
+        h("div", {cls: "card"}, h("h3", {}, "Longest pauses"), s.longest_pauses.length ? s.longest_pauses.map(p => h("div", {}, h("button", {cls: "ts", onclick: () => seek(p.at)}, ts(p.at)), ` ${p.seconds}s silence`)) : h("span", {cls: "muted"}, "none over 1s")))));
+}
+
+function videoPane(r) {
+  const m = r.media, v = r.visual, a = r.audio, page = r.source && r.source.page;
+  if (!m) return h("div", {cls: "empty"}, current.status === "failed" ? "Job failed before the media was read." : "Probing media…");
+  const dur = m.duration || 1;
+  const rows = [["Container", m.container], ["Duration", ts(m.duration)], ["File size", m.size_mb + " MB"], ["Bitrate", m.bitrate_kbps + " kb/s"],
+    ["Video", m.video ? `${m.video.codec} · ${m.video.width}×${m.video.height} · ${m.video.fps} fps` : "none"],
+    ["Audio", m.audio ? `${m.audio.codec} · ${m.audio.sample_rate} Hz · ${m.audio.channels} ch` : "none"]];
+  if (page) rows.push(["Uploader", page.uploader || page.channel], ["Published", page.upload_date], ["Views", page.view_count], ["Page", page.webpage_url]);
+  return h("div", {},
+    h("div", {cls: "grid", style: "margin-bottom:14px"},
+      tile("Scenes", v ? v.scene_count : null, v ? v.cuts_per_minute + " cuts / min" : ""), tile("Avg shot", v && v.avg_shot_seconds != null ? v.avg_shot_seconds + "s" : null),
+      tile("Loudness", a ? a.integrated_lufs : null, "LUFS integrated"), tile("Loudness range", a ? a.loudness_range_lu : null, "LU"),
+      tile("Silence", a ? Math.round(a.silence_ratio * 100) + "%" : null, a ? ts(a.silence_seconds) + " total" : "")),
+    h("div", {cls: "card"}, h("h3", {}, "Timeline"), h("div", {cls: "muted", style: "font-size:12px"}, "Blue: scene cuts · grey: silence. Click to play from there."),
+      h("div", {cls: "timeline", onclick: e => { const b = e.currentTarget.getBoundingClientRect(); seek((e.clientX - b.left) / b.width * dur); }},
+        (a ? a.silences : []).map(s => h("span", {cls: "sil", style: `left:${s.start / dur * 100}%;width:${(s.end - s.start) / dur * 100}%`})),
+        (v ? v.scene_cuts : []).map(t => h("span", {style: `left:${t / dur * 100}%`, title: ts(t)})))),
+    h("div", {cls: "two"},
+      h("div", {cls: "card"}, h("h3", {}, "Media"), h("table", {}, rows.map(([k, x]) => row(k, x)))),
+      h("div", {cls: "card"}, h("h3", {}, "Keyframes"), v && v.keyframes.length ? h("div", {cls: "frames", style: "grid-template-columns:repeat(auto-fill,minmax(120px,1fr))"},
+        v.keyframes.map(k => h("figure", {}, h("img", {src: `/api/jobs/${current.id}/frames/${k.file}`, alt: "Frame at " + ts(k.time), loading: "lazy", onclick: () => seek(k.time)}), h("figcaption", {}, ts(k.time))))) : h("span", {cls: "muted"}, "none"))));
+}
+
+function screenPane(r) {
+  const s = r.screen_text;
+  if (!s) return h("div", {cls: "empty"}, r.screen_text_error || (r.options && r.options.ocr && CFG.ai ? (current.status === "done" ? "No keyframes to read." : "Reading frames…") : "On-screen text reading needs the AI layer and the option enabled."));
+  return h("div", {},
+    h("div", {cls: "card"}, h("h3", {}, "Visual summary"), h("p", {}, s.visual_summary), h("p", {cls: "muted"}, "Setting: " + s.setting),
+      h("button", {onclick: () => navigator.clipboard.writeText(s.frames.filter(f => f.on_screen_text).map(f => `[${ts(f.time)}] ${f.on_screen_text}`).join("\n")).then(() => toast("On-screen text copied"))}, "Copy all on-screen text")),
+    h("div", {cls: "frames"}, s.frames.map(f => h("figure", {},
+      h("img", {src: `/api/jobs/${current.id}/frames/${f.file}`, alt: f.description, loading: "lazy", onclick: () => seek(f.time)}),
+      h("figcaption", {}, h("button", {cls: "ts", onclick: () => seek(f.time)}, ts(f.time)), " ", f.description,
+        f.on_screen_text ? h("div", {cls: "ocr"}, f.on_screen_text) : h("div", {cls: "muted"}, "no text"))))));
+}
+
+window.addEventListener("beforeunload", e => { if (Object.values(dirty).some(Boolean)) { e.preventDefault(); e.returnValue = ""; } });
+init();
+</script>
+</body>
+</html>
