@@ -88,5 +88,70 @@ class CudaFallback(unittest.TestCase):
         self.assertFalse(self.p._cuda_broken)
 
 
+class SpeakerStageFailure(unittest.TestCase):
+    def test_speaker_failure_keeps_the_transcript(self):
+        import tempfile
+        from pathlib import Path
+        from app import pipeline
+        names = ("probe", "extract_audio", "transcribe", "scan_audio")
+        saved, saved_diarize = {n: getattr(pipeline, n) for n in names}, pipeline.speakers.diarize
+        pipeline.probe = lambda src: {"duration": 2.0, "audio": {"codec": "aac"}, "video": None}
+        pipeline.extract_audio = lambda src, d, dur: Path(d) / "audio.wav"
+        pipeline.transcribe = lambda wav, m, lang, p: {"segments": [{"start": 0.0, "end": 1.0, "text": "hi there"}],
+                                                        "language": "en", "language_probability": 1.0}
+        pipeline.scan_audio = lambda src, dur: {"silences": []}
+
+        def offline(*a):
+            raise OSError("model download failed: no network")
+        pipeline.speakers.diarize = offline
+        stages = {}
+
+        def update(stage, status=None, progress=None, **fields):
+            if status:
+                stages[stage] = status
+        opts = {"model": "tiny", "language": None, "ai": False, "ocr": False, "speakers": True, "num_speakers": 0,
+                "translate_to": ""}
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                pipeline.process({"dir": d}, update, Path(d) / "x.mp4", None, opts)
+                self.assertEqual((Path(d) / "transcript.txt").read_text(encoding="utf-8"), "hi there\n")
+        finally:
+            for n, f in saved.items():
+                setattr(pipeline, n, f)
+            pipeline.speakers.diarize = saved_diarize
+        self.assertEqual((stages["speakers"], stages["transcribe"]), ("failed", "done"))
+
+
+class ModelDownload(unittest.TestCase):
+    def test_checksum_mismatch_keeps_nothing_and_match_installs(self):
+        import hashlib
+        import tempfile
+        from pathlib import Path
+        from app import speakers
+        with tempfile.TemporaryDirectory() as d:
+            src, dest = Path(d) / "src.bin", Path(d) / "models" / "m.onnx"
+            src.write_bytes(b"model bytes")
+            with self.assertRaisesRegex(RuntimeError, "checksum"):
+                speakers._fetch(src.as_uri(), dest, "0" * 64)
+            self.assertEqual(list(dest.parent.iterdir()), [])  # no model, no .part left behind
+            good = hashlib.sha256(b"model bytes").hexdigest()
+            self.assertEqual(speakers._fetch(src.as_uri(), dest, good).read_bytes(), b"model bytes")
+            dest.write_bytes(b"truncated")  # a damaged cached copy is replaced, not trusted
+            self.assertEqual(speakers._fetch(src.as_uri(), dest, good).read_bytes(), b"model bytes")
+
+
+class Timeouts(unittest.TestCase):
+    def test_budget_scales_with_duration(self):
+        from app.pipeline import budget
+        self.assertGreater(budget(3600), budget(60))
+        self.assertGreaterEqual(budget(0), 3600)  # unknown length: generous fixed cap
+
+    def test_hung_subprocess_becomes_readable_error(self):
+        import sys
+        from app.pipeline import run
+        with self.assertRaisesRegex(RuntimeError, "timed out"):
+            run([sys.executable, "-c", "import time; time.sleep(10)"], timeout=0.5)
+
+
 if __name__ == "__main__":
     unittest.main()

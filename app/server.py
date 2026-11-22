@@ -15,7 +15,7 @@ import mimetypes
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import ai, pipeline
@@ -26,6 +26,7 @@ OUT = Path(os.environ.get("VVTR_OUTPUT", ROOT.parent / "outputs"))
 OUT.mkdir(parents=True, exist_ok=True)
 JOBS: dict[str, dict] = {}
 LOCK = threading.Lock()
+SAVE_LOCK = threading.Lock()
 WORKER = ThreadPoolExecutor(1)  # ponytail: one job at a time (one GPU); a queue forms naturally
 ID_RE = re.compile(r"[0-9a-f]{12}")
 EXPORT_TYPES = {"txt": "text/plain", "srt": "application/x-subrip", "vtt": "text/vtt", "md": "text/markdown",
@@ -61,7 +62,19 @@ def snapshot(job: dict) -> dict:
 
 
 def persist(job: dict) -> None:
-    (Path(job["dir"]) / "job.json").write_text(json.dumps(snapshot(job), ensure_ascii=False, indent=1), encoding="utf-8")
+    """Write-then-rename: a reader of job.json sees the old or the new state, never half a file."""
+    f = Path(job["dir"]) / "job.json"
+    tmp = f.with_name(f"job.{uuid.uuid4().hex[:8]}.tmp")
+    tmp.write_text(json.dumps(snapshot(job), ensure_ascii=False, indent=1), encoding="utf-8")
+    try:
+        for _ in range(40):
+            try:
+                return tmp.replace(f)
+            except PermissionError:  # Windows: a request has job.json open at this instant
+                time.sleep(0.05)
+        tmp.replace(f)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def load(job_id: str) -> dict:
@@ -102,9 +115,14 @@ def run_job(job: dict, src: Path | None, url: str | None, opts: dict) -> None:
                 if st["status"] == "running":
                     st["status"] = "failed"
     finally:
-        job["finished"] = time.time()
-        (Path(job["dir"]) / "audio.wav").unlink(missing_ok=True)
-        persist(job)
+        with LOCK:
+            job["finished"] = time.time()
+        try:
+            (Path(job["dir"]) / "audio.wav").unlink(missing_ok=True)
+            persist(job)
+        finally:
+            with LOCK:  # job.json now holds the final state; load() reads it from there
+                JOBS.pop(job["id"], None)
 
 
 def mark_interrupted() -> None:
@@ -136,7 +154,7 @@ def config():
 @app.post("/api/jobs")
 def create_job(file: UploadFile | None = File(None), url: str = Form(""), model: str = Form(""),
                language: str = Form(""), translate_to: str = Form(""), use_ai: bool = Form(True),
-               ocr: bool = Form(True)):
+               ocr: bool = Form(True), speakers: bool = Form(True), num_speakers: int = Form(0)):
     url = url.strip()
     if bool(url) == bool(file and file.filename):
         raise HTTPException(400, "give either a file or a URL")
@@ -146,13 +164,16 @@ def create_job(file: UploadFile | None = File(None), url: str = Form(""), model:
         raise HTTPException(400, f"unknown model; choose one of {pipeline.MODELS}")
     if language and not re.fullmatch(r"[a-z]{2,3}", language):
         raise HTTPException(400, "language must be an ISO code such as en, es, de")
+    if not 0 <= num_speakers <= 20:
+        raise HTTPException(400, "number of speakers must be 0 (auto) to 20")
 
     job_id = uuid.uuid4().hex[:12]
     d = OUT / job_id
     d.mkdir()
     src = pipeline.save_upload(file.file, file.filename, d) if not url else None
     opts = {"model": model or pipeline.default_model(), "language": language or None,
-            "translate_to": translate_to.strip()[:40], "ai": use_ai, "ocr": ocr}
+            "translate_to": translate_to.strip()[:40], "ai": use_ai, "ocr": ocr, "speakers": speakers,
+            "num_speakers": num_speakers}
     job = {"id": job_id, "dir": str(d), "created": time.time(), "status": "queued", "error": None,
            "name": url or file.filename, "stages": {}, "result": {}}
     with LOCK:
@@ -191,10 +212,9 @@ def get_job(job_id: str):
 @app.delete("/api/jobs/{job_id}")
 def delete_job(job_id: str):
     job = load(job_id)
-    if job["status"] in ("queued", "running"):
-        raise HTTPException(409, "job is still running")
-    with LOCK:
-        JOBS.pop(job_id, None)
+    with LOCK:  # a job stays in JOBS until its final job.json is written
+        if job_id in JOBS or job["status"] in ("queued", "running"):
+            raise HTTPException(409, "job is still running")
     shutil.rmtree(job_dir(job_id), ignore_errors=True)
     return {"deleted": job_id}
 
@@ -224,6 +244,7 @@ class Seg(BaseModel):
     start: float
     end: float
     text: str
+    speaker: str | None = Field(None, max_length=80)
 
 
 class ExportReq(BaseModel):
@@ -237,15 +258,16 @@ class ExportReq(BaseModel):
 def export_job(job_id: str, req: ExportReq):
     if req.fmt not in EXPORT_TYPES or req.kind not in ("transcript", "translation"):
         raise HTTPException(400, "bad format or kind")
-    job = load(job_id)
-    segs = [s.model_dump() for s in req.segments]
-    title = job["result"].get("source", {}).get("page", {}) or {}
-    body = export(segs, req.fmt, title=title.get("title") or job["name"])
-    if req.save:  # edits survive a reload: stored beside the raw output, raw is never overwritten
-        (job_dir(job_id) / f"{req.kind}_edited.{req.fmt}").write_text(body, encoding="utf-8")
-        with LOCK:
-            job["result"][f"{req.kind}_edited"] = segs
-        persist(job)
+    segs = [s.model_dump(exclude_none=True) for s in req.segments]
+    with SAVE_LOCK:  # finished jobs are read fresh from disk: serialise read-modify-write so no save is lost
+        job = load(job_id)
+        title = job["result"].get("source", {}).get("page", {}) or {}
+        body = export(segs, req.fmt, title=title.get("title") or job["name"])
+        if req.save:  # edits survive a reload: stored beside the raw output, raw is never overwritten
+            (job_dir(job_id) / f"{req.kind}_edited.{req.fmt}").write_text(body, encoding="utf-8")
+            with LOCK:
+                job["result"][f"{req.kind}_edited"] = segs
+            persist(job)
     return Response(body, media_type=f"{EXPORT_TYPES[req.fmt]}; charset=utf-8",
                     headers={"Content-Disposition": f'attachment; filename="{req.kind}-{job_id}.{req.fmt}"'})
 

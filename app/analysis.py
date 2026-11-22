@@ -50,6 +50,19 @@ def text_stats(segments: list[dict], duration: float) -> dict:
             pauses.append({"after_segment": i - 1, "at": round(segments[i - 1]["end"], 2), "seconds": round(gap, 2)})
     pauses.sort(key=lambda p: -p["seconds"])
 
+    per: dict[str, dict] = {}
+    prev = None
+    for s in segments:
+        if spk := s.get("speaker"):
+            p = per.setdefault(spk, {"speaker": spk, "seconds": 0.0, "words": 0, "turns": 0})
+            p["seconds"] += max(0.0, s["end"] - s["start"])
+            p["words"] += len(WORD_RE.findall(s["text"]))
+            p["turns"] += spk != prev
+            prev = spk  # an unlabelled line in between does not end the turn
+    talk = sum(p["seconds"] for p in per.values())
+    speakers = sorted(({**p, "seconds": round(p["seconds"], 2), "share": round(p["seconds"] / talk, 3) if talk else 0}
+                       for p in per.values()), key=lambda p: -p["seconds"])
+
     logprobs = [s["avg_logprob"] for s in segments if s.get("avg_logprob") is not None]
     syl = sum(syllables(w) for w in words)
     wps = n / sentences if sentences else 0
@@ -72,7 +85,27 @@ def text_stats(segments: list[dict], duration: float) -> dict:
         "avg_confidence": round(sum(math.exp(lp) for lp in logprobs) / len(logprobs), 3) if logprobs else None,
         "low_confidence_segments": [i for i, s in enumerate(segments)
                                     if s.get("avg_logprob") is not None and s["avg_logprob"] < LOW_CONFIDENCE_LOGPROB],
+        "speakers": speakers,
     }
+
+
+def assign_speakers(segments: list[dict], turns: list[dict], reach: float = 2.0) -> list[dict]:
+    """Label each transcript segment with the diarization turn it overlaps most (or the nearest one within `reach`
+    seconds). Speakers are renumbered 1..n in order of first speech. Returns new dicts; input is untouched."""
+    if not turns:
+        return segments
+    order: dict = {}  # numbered by first labelled line, so a voice heard only outside speech takes no number
+    out = []
+    for s in segments:
+        def score(t):
+            overlap = min(s["end"], t["end"]) - max(s["start"], t["start"])
+            return overlap if overlap > 0 else -max(t["start"] - s["end"], s["start"] - t["end"])
+        best = max(turns, key=score)
+        if score(best) > -reach:
+            out.append(dict(s, speaker=f"Speaker {order.setdefault(best['speaker'], len(order) + 1)}"))
+        else:
+            out.append(dict(s))
+    return out
 
 
 def merge_translation(segments: list[dict], items: list[dict]) -> list[dict]:
@@ -81,6 +114,8 @@ def merge_translation(segments: list[dict], items: list[dict]) -> list[dict]:
     out = []
     for i, s in enumerate(segments):
         seg = {"start": s["start"], "end": s["end"], "text": by_index.get(i, s["text"])}
+        if s.get("speaker"):
+            seg["speaker"] = s["speaker"]
         if i not in by_index:
             seg["untranslated"] = True
         out.append(seg)
@@ -102,21 +137,38 @@ def short_ts(seconds: float) -> str:
 
 def _cue(text: str) -> str:
     """A blank line ends an SRT/VTT cue, so an edited segment may contain line breaks but never an empty line."""
-    return re.sub(r"\n\s*\n+", "\n", text.strip())
+    return re.sub(r"\n\s*\n+", "\n", re.sub(r"\r\n?", "\n", text).strip())  # a lone \r is a line break to players
+
+
+def _one_line(text: str) -> str:
+    """Speaker names and titles sit inside one cue line or heading: no line breaks."""
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _vtt(s: dict) -> str:
+    text = s["text"].replace("&", "&amp;").replace("<", "&lt;")
+    voice = re.sub(r"[<>&\n]", "", s.get("speaker") or "").strip()
+    return f"<v {voice}>{text}" if voice else text
 
 
 def export(segments: list[dict], fmt: str, title: str = "Transcript") -> str:
-    segments = [dict(s, text=_cue(s["text"])) for s in segments]
+    segments = [dict(s, text=_cue(s["text"]), **({"speaker": _one_line(s["speaker"])} if s.get("speaker") else {}))
+                for s in segments]
+    title = _one_line(title)
+    said = [f"{s['speaker']}: " if s.get("speaker") else "" for s in segments]  # every cue / line
+    turn = [p if i == 0 or segments[i - 1].get("speaker") != s.get("speaker") else ""  # only where the voice changes
+            for i, (s, p) in enumerate(zip(segments, said))]
     if fmt == "txt":
-        return "\n".join(s["text"].strip() for s in segments) + "\n"
+        return "\n".join(p + s["text"] for p, s in zip(turn, segments)) + "\n"
     if fmt == "srt":
-        return "\n".join(f"{i}\n{fmt_ts(s['start'])} --> {fmt_ts(s['end'])}\n{s['text'].strip()}\n"
-                         for i, s in enumerate(segments, 1))
+        return "\n".join(f"{i}\n{fmt_ts(s['start'])} --> {fmt_ts(s['end'])}\n{p}{s['text']}\n"
+                         for i, (p, s) in enumerate(zip(said, segments), 1))
     if fmt == "vtt":
-        return "WEBVTT\n\n" + "\n".join(f"{fmt_ts(s['start'], '.')} --> {fmt_ts(s['end'], '.')}\n{s['text'].strip()}\n"
+        return "WEBVTT\n\n" + "\n".join(f"{fmt_ts(s['start'], '.')} --> {fmt_ts(s['end'], '.')}\n{_vtt(s)}\n"
                                         for s in segments)
     if fmt == "md":
-        return f"# {title}\n\n" + "".join(f"**[{short_ts(s['start'])}]** {s['text'].strip()}\n\n" for s in segments)
+        return f"# {title}\n\n" + "".join(f"**[{short_ts(s['start'])}]{' ' + p.strip() if p else ''}** {s['text']}\n\n"
+                                          for p, s in zip(turn, segments))
     if fmt == "json":
         return json.dumps(segments, ensure_ascii=False, indent=2)
     raise ValueError(f"unknown export format: {fmt}")

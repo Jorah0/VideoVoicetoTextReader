@@ -61,7 +61,8 @@ def call(system: str, content, schema: dict, effort: str = "medium") -> dict:
 
 def transcript_block(segments: list[dict]) -> str:
     # "<" escaped so spoken/captioned text can never close the <transcript> data block
-    return "\n".join(f"[{i}] ({short_ts(s['start'])}) {s['text'].replace('<', '&lt;')}" for i, s in enumerate(segments))
+    return "\n".join(f"[{i}] ({short_ts(s['start'])}) {s['speaker'] + ': ' if s.get('speaker') else ''}"
+                     f"{s['text'].replace('<', '&lt;')}" for i, s in enumerate(segments))
 
 
 LANG_ALIASES = {"iw": "he", "jw": "jv", "in": "id", "ji": "yi", "mo": "ro", "yue": "zh"}
@@ -97,7 +98,8 @@ def review(segments: list[dict], transcript: dict, source: dict, stats: dict) ->
         "(wrong word, misspelled proper noun, broken punctuation that changes meaning). Keep the original language "
         "and the speaker's wording; never translate or paraphrase. Use the segment index in brackets; "
         "(4) categorise the content, list topics, named entities, sentiment, tone, audience, key quotes (verbatim) "
-        "and action items; (5) split into chapters at topic changes using segment indices."
+        "and action items; (5) split into chapters at topic changes using segment indices. "
+        "'Speaker N:' prefixes, when present, come from voice clustering, not from the speech; never correct them."
     )
     meta = {"recogniser_language": transcript["language"], "recogniser_confidence": transcript["language_probability"],
             "title": (source.get("page") or {}).get("title"), "words": stats["word_count"],
@@ -111,11 +113,13 @@ def clean_review(raw: dict, segments: list[dict], whisper_language: str) -> dict
     out = dict(raw)
     out["language_mismatch"] = lang_code(raw["primary_language_code"]) != lang_code(whisper_language)
     out["cohesion_score"] = max(0, min(100, int(raw["cohesion_score"])))
+    def fixed(c):  # the model may echo the "Speaker N: " label it was shown; it is not part of the text
+        text, spk = c["corrected"].strip(), segments[c["index"]].get("speaker")
+        return text[len(spk) + 2:].strip() if spk and text.startswith(spk + ": ") else text
     out["corrections"] = [
-        {"index": c["index"], "original": segments[c["index"]]["text"], "corrected": c["corrected"].strip(),
-         "reason": c["reason"]}
+        {"index": c["index"], "original": segments[c["index"]]["text"], "corrected": fixed(c), "reason": c["reason"]}
         for c in raw["corrections"]
-        if 0 <= c["index"] < n and c["corrected"].strip() and c["corrected"].strip() != segments[c["index"]]["text"].strip()
+        if 0 <= c["index"] < n and fixed(c) and fixed(c) != segments[c["index"]]["text"].strip()
     ]
     out["chapters"] = sorted(
         ({**c, "start": segments[c["start_index"]]["start"]} for c in raw["chapters"] if 0 <= c["start_index"] < n),

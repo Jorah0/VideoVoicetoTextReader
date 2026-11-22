@@ -51,7 +51,8 @@ video{width:100%;border-radius:8px;background:#000;max-height:260px}
 .toolbar input[type=text]{width:200px}
 .toolbar select{width:auto}
 .segs{max-height:62vh;overflow:auto;border:1px solid var(--line);border-radius:8px}
-.seg{display:grid;grid-template-columns:70px 1fr;gap:10px;padding:7px 10px;border-bottom:1px solid var(--line)}
+.seg{display:grid;grid-template-columns:84px 1fr;gap:10px;padding:7px 10px;border-bottom:1px solid var(--line)}
+.spk{display:block;font-size:11px;font-weight:650;background:none;border:0;padding:0;text-align:left;cursor:pointer;max-width:84px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .seg:last-child{border-bottom:0}
 .seg.low{background:color-mix(in srgb,var(--warn) 8%,transparent)}
 .seg.playing{background:color-mix(in srgb,var(--accent) 12%,transparent)}
@@ -118,6 +119,8 @@ table{border-collapse:collapse;width:100%;font-size:13px}td{padding:5px 6px;bord
     <datalist id="langs"><option>English<option>Spanish<option>French<option>German<option>Portuguese<option>Italian<option>Japanese<option>Korean<option>Chinese (Simplified)<option>Arabic<option>Hindi<option>Russian</datalist>
     <label class="check"><input type="checkbox" id="useAi" checked> AI language &amp; cohesion review, categories</label>
     <label class="check"><input type="checkbox" id="ocr" checked> Read on-screen text (AI vision)</label>
+    <label class="check"><input type="checkbox" id="spk" checked> Speaker labels (who said what)
+      <input type="number" id="nspk" min="0" max="20" placeholder="auto" aria-label="Number of speakers (blank = auto)" title="Number of speakers, if you know it" style="width:64px;margin-left:auto"></label>
     <button class="primary" id="go" style="width:100%;margin-top:8px">Scan &amp; transcribe</button>
     <div id="formErr" class="bad" style="font-size:12px;margin-top:6px"></div>
   </section>
@@ -132,7 +135,7 @@ table{border-collapse:collapse;width:100%;font-size:13px}td{padding:5px 6px;bord
 
 <script>
 const $ = s => document.querySelector(s);
-const STAGE_NAMES = {acquire:"Acquire",probe:"Probe media",transcribe:"Speech → text",visual_scan:"Video scan",
+const STAGE_NAMES = {acquire:"Acquire",probe:"Probe media",transcribe:"Speech → text",speakers:"Speakers",visual_scan:"Video scan",
   audio_scan:"Audio scan",screen_text:"On-screen text",text_analysis:"Text analysis",ai_review:"AI review",translate:"Translate"};
 let CFG = {}, current = null, poll = null, tab = "transcript", segs = {transcript: [], translation: []}, dirty = {};
 let pickedFile = null, srcMode = "file";
@@ -187,6 +190,7 @@ $("#go").onclick = async () => {
   else { const u = $("#url").value.trim(); if (!/^https?:\/\//i.test(u)) return $("#formErr").textContent = "Enter an http(s) URL."; fd.append("url", u); }
   fd.append("model", $("#model").value); fd.append("language", $("#lang").value.trim().toLowerCase());
   fd.append("translate_to", $("#tr").value.trim()); fd.append("use_ai", $("#useAi").checked); fd.append("ocr", $("#ocr").checked);
+  fd.append("speakers", $("#spk").checked); fd.append("num_speakers", $("#nspk").value || 0);
   $("#go").disabled = true; $("#go").textContent = srcMode === "file" ? "Uploading…" : "Starting…";
   try { const {id} = await (await api("/api/jobs", {method: "POST", body: fd})).json(); openJob(id); }
   catch (e) { $("#formErr").textContent = e.message; }
@@ -225,16 +229,20 @@ async function refresh(first, g) {
   current = job;
   const r = job.result;
   // Re-render only when new results land, so a user reading/editing isn't interrupted by progress ticks.
-  const changed = first || !active || stalePane || ["transcript", "stats", "review", "translation", "visual", "audio", "screen_text", "media"].some(k => !!before[k] !== !!r[k]);
+  const labelled = t => !!(t && t.segments.some(s => s.speaker));
+  const changed = first || !active || stalePane || labelled(before.transcript) !== labelled(r.transcript) ||
+    ["transcript", "stats", "review", "translation", "visual", "audio", "screen_text", "media"].some(k => !!before[k] !== !!r[k]);
   if (changed) {
     if (!dirty.transcript) segs.transcript = clone(r.transcript_edited || (r.transcript && r.transcript.segments) || []);
+    else if (r.transcript) r.transcript.segments.forEach((s, i) => { const e = segs.transcript[i]; if (e && s.speaker && !e.speaker) e.speaker = s.speaker; });
     if (!dirty.translation) segs.translation = clone(r.translation_edited || (r.translation && r.translation.segments) || []);
     render();
   } else renderStages();
   if (active) poll = setTimeout(() => refresh(false, g), 1000);
   if (first || (wasActive && !active)) loadHistory();
 }
-const clone = a => a.map(s => ({start: s.start, end: s.end, text: s.text, avg_logprob: s.avg_logprob, untranslated: s.untranslated}));
+const clone = a => a.map(s => ({start: s.start, end: s.end, text: s.text, speaker: s.speaker, avg_logprob: s.avg_logprob, untranslated: s.untranslated}));
+const spkColor = name => { let x = 0; for (const c of name) x = (x * 31 + c.charCodeAt(0)) % 360; return `hsl(${x * 7 % 360} 60% 50%)`; };
 
 // The shell (head, player, tabs, pane) is built once per job; later renders update parts in place, so the video
 // keeps playing and a pane the user is typing in is left alone until they leave it.
@@ -314,15 +322,17 @@ function editor(kind) {
     const q = search.value.trim().toLowerCase();
     box.replaceChildren(...list.map((s, i) => {
       if (onlyLow.checked && !low.has(i)) return null;
-      if (q && !s.text.toLowerCase().includes(q)) return null;
+      if (q && !(s.text + "\n" + (s.speaker || "")).toLowerCase().includes(q)) return null;
       const txt = h("div", {cls: "txt", contenteditable: "plaintext-only", spellcheck: "true", "aria-label": "Segment " + (i + 1)});
       if (q) highlight(txt, s.text, q); else txt.textContent = s.text;
       const orig = raw[i] && raw[i].text;
       if (orig != null && orig !== s.text) txt.classList.add("changed");
       txt.oninput = () => { s.text = txt.innerText.replace(/\n+$/, ""); dirty[kind] = true; txt.classList.toggle("changed", s.text !== orig); };
       const c = corrections[i];
+      const who = s.speaker ? h("button", {cls: "spk", style: "color:" + spkColor(s.speaker), title: s.speaker + ": click to change the speaker of this line",
+        onclick: () => { const v = (window.prompt("Speaker for this line", s.speaker) || "").trim().slice(0, 80); if (v && v !== s.speaker) { s.speaker = v; dirty[kind] = true; render(true); } }}, s.speaker) : null;
       return h("div", {cls: "seg" + (low.has(i) ? " low" : ""), "data-i": i},
-        h("button", {cls: "ts", onclick: () => seek(s.start), title: "Play from here"}, ts(s.start)), txt,
+        h("div", {}, h("button", {cls: "ts", onclick: () => seek(s.start), title: "Play from here"}, ts(s.start)), who), txt,
         low.has(i) ? h("div", {cls: "sugg warn"}, "Low recognition confidence: check this line") : null,
         s.untranslated ? h("div", {cls: "sugg warn"}, "Not translated by AI: original text kept") : null,
         c && c.corrected !== s.text ? h("div", {cls: "sugg"}, "AI suggests:", h("b", {}, c.corrected), h("span", {}, "(" + c.reason + ")"),
@@ -331,6 +341,13 @@ function editor(kind) {
   };
   search.oninput = draw; onlyLow.onchange = draw; draw();
   const nCorr = Object.keys(corrections).length;
+  const names = [...new Set(list.map(s => s.speaker).filter(Boolean))];
+  const rename = (from, input) => {
+    const to = input.value.trim().slice(0, 80);
+    if (!to) { input.value = from; return; }
+    for (const k of ["transcript", "translation"]) for (const s of segs[k]) if (s.speaker === from) { s.speaker = to; dirty[k] = true; }
+    render(true);
+  };
   return h("div", {cls: "card"},
     h("div", {cls: "toolbar"}, search,
       low.size ? h("label", {cls: "check", style: "margin:0"}, onlyLow, `Low confidence only (${low.size})`) : null,
@@ -338,7 +355,9 @@ function editor(kind) {
       h("span", {style: "flex:1"}), fmt,
       h("button", {onclick: () => doExport(kind, fmt.value, false)}, "Download"),
       h("button", {cls: "primary", onclick: () => doExport(kind, fmt.value, true)}, "Save edits"),
-      h("button", {onclick: () => navigator.clipboard.writeText(list.map(s => s.text).join("\n")).then(() => toast("Copied"))}, "Copy")),
+      h("button", {onclick: () => navigator.clipboard.writeText(list.map(s => (s.speaker ? s.speaker + ": " : "") + s.text).join("\n")).then(() => toast("Copied"))}, "Copy")),
+    names.length ? h("div", {cls: "toolbar"}, h("span", {cls: "muted", style: "font-size:12px"}, "Speakers (rename here; giving two the same name merges them):"),
+      names.map(n => h("input", {type: "text", value: n, "aria-label": "Rename " + n, style: "width:130px;border-left:4px solid " + spkColor(n), onchange: e => rename(n, e.target)}))) : null,
     h("div", {cls: "muted", style: "font-size:12px;margin-bottom:8px"}, `${list.length} segments · click any line to edit · click a time to play. Raw output is kept; saved edits are stored beside it.`),
     box);
 }
@@ -348,10 +367,17 @@ function highlight(el, text, q) {
   el.append(text.slice(i));
 }
 async function doExport(kind, fmt, save) {
+  const post = k => api(`/api/jobs/${current.id}/export`, {method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({fmt, kind: k, save, segments: segs[k].map(s => ({start: s.start, end: s.end, text: s.text, speaker: s.speaker || null}))})});
   try {
-    const res = await api(`/api/jobs/${current.id}/export`, {method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({fmt, kind, save, segments: segs[kind].map(s => ({start: s.start, end: s.end, text: s.text}))})});
-    if (save) { dirty[kind] = false; current.result[kind + "_edited"] = clone(segs[kind]); toast("Saved to outputs/" + current.id + "/" + kind + "_edited." + fmt); }
+    const res = await post(kind);
+    if (save) {
+      // a speaker rename touches both tabs: save the other one too, so a reload never shows them disagreeing
+      const kinds = [kind, ...["transcript", "translation"].filter(k => k !== kind && dirty[k] && segs[k].length)];
+      if (kinds.length > 1) await post(kinds[1]);
+      for (const k of kinds) { dirty[k] = false; current.result[k + "_edited"] = clone(segs[k]); }
+      toast("Saved " + kinds.map(k => k + "_edited." + fmt).join(" and ") + " to outputs/" + current.id);
+    }
     const blob = await res.blob(), a = h("a", {href: URL.createObjectURL(blob), download: `${kind}-${current.id}.${fmt}`});
     document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
   } catch (e) { toast("Export failed: " + e.message); }
@@ -392,6 +418,9 @@ function textPane(s) {
   const max = s.top_keywords.length ? s.top_keywords[0][1] : 1;
   const fill = Object.entries(s.filler_words).sort((a, b) => b[1] - a[1]);
   const nFill = fill.reduce((a, [, c]) => a + c, 0);
+  const renamed = {};  // raw label -> current name, only where every line of that speaker was renamed the same way
+  ((current.result.transcript || {}).segments || []).forEach((r, i) => { const e = segs.transcript[i];
+    if (r.speaker && e && e.speaker) renamed[r.speaker] = renamed[r.speaker] === undefined || renamed[r.speaker] === e.speaker ? e.speaker : null; });
   return h("div", {},
     h("div", {cls: "grid", style: "margin-bottom:14px"},
       tile("Words", s.word_count), tile("Unique words", s.unique_words, "diversity " + s.lexical_diversity),
@@ -399,6 +428,10 @@ function textPane(s) {
       tile("Sentences", s.sentence_count, s.avg_sentence_words + " words avg"), tile("Reading ease", s.flesch_reading_ease, "Flesch (English)"),
       tile("Grade level", s.fk_grade, "Flesch-Kincaid"), tile("Avg confidence", s.avg_confidence == null ? null : Math.round(s.avg_confidence * 100) + "%", s.low_confidence_segments.length + " low-confidence lines"),
       tile("Filler words", nFill, s.word_count ? (nFill / s.word_count * 100).toFixed(1) + "% of words" : "")),
+    s.speakers && s.speakers.length ? h("div", {cls: "card"}, h("h3", {}, "Speakers"), h("div", {cls: "muted", style: "font-size:12px;margin-bottom:6px"}, "Share of talk time from the voice analysis (renames shown; single-line speaker changes are not recounted)"),
+      s.speakers.map(p => h("div", {cls: "kw", style: "grid-template-columns:120px 1fr minmax(0,260px)"}, h("b", {style: "color:" + spkColor(renamed[p.speaker] || p.speaker)}, renamed[p.speaker] || p.speaker),
+        h("div", {cls: "bar"}, h("i", {style: `width:${p.share * 100}%;background:${spkColor(p.speaker)}`})),
+        h("span", {cls: "muted"}, `${Math.round(p.share * 100)}% · ${ts(p.seconds)} · ${p.words} words · ${p.turns} turns`)))) : null,
     h("div", {cls: "two"},
       h("div", {cls: "card"}, h("h3", {}, "Top keywords"), s.top_keywords.length ? s.top_keywords.map(([w, c]) => h("div", {cls: "kw"}, h("span", {}, w), h("div", {cls: "bar"}, h("i", {style: `width:${c / max * 100}%`})), h("span", {cls: "muted"}, c))) : h("span", {cls: "muted"}, "none")),
       h("div", {},

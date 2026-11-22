@@ -95,6 +95,66 @@ class Api(unittest.TestCase):
         self.assertEqual(on_disk["stages"]["probe"]["status"], "failed")
         self.assertEqual(on_disk["stages"]["acquire"]["status"], "done")
 
+    def test_finished_job_leaves_memory_but_stays_readable(self):
+        d = Path(TMP) / "aaaaaaaaaaaa"
+        d.mkdir(exist_ok=True)
+        job = {"id": d.name, "dir": str(d), "name": "z", "created": 4.0, "status": "queued", "error": None,
+               "stages": {}, "result": {}}
+        server.JOBS[d.name] = job
+        saved = server.pipeline.process
+        server.pipeline.process = lambda job, update, *a: {"stats": {"word_count": 3}}
+        try:
+            server.run_job(job, None, None, {})
+        finally:
+            server.pipeline.process = saved
+        self.assertNotIn(d.name, server.JOBS)
+        got = self.c.get(f"/api/jobs/{d.name}").json()
+        self.assertEqual((got["status"], got["result"]["stats"]["word_count"]), ("done", 3))
+
+    def test_simultaneous_saves_both_survive(self):
+        import threading
+        reqs = [server.ExportReq(fmt="txt", kind=k, segments=SEGS, save=True) for k in ("transcript", "translation")] * 5
+        threads = [threading.Thread(target=server.export_job, args=(JOB_ID, r)) for r in reqs]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        result = self.c.get(f"/api/jobs/{JOB_ID}").json()["result"]
+        self.assertIn("transcript_edited", result)
+        self.assertIn("translation_edited", result)
+        self.assertEqual([p.name for p in (Path(TMP) / JOB_ID).glob("*.tmp")], [])
+
+    def test_failed_final_write_still_releases_memory(self):
+        job = {"id": "cccccccccccc", "dir": str(Path(TMP) / "missing" / "cccccccccccc"), "name": "w", "created": 5.0,
+               "status": "queued", "error": None, "stages": {}, "result": {}}
+        server.JOBS[job["id"]] = job
+        saved = server.pipeline.process
+        server.pipeline.process = lambda job, update, *a: {}
+        try:
+            with self.assertRaises(OSError):  # the job folder is gone: job.json cannot be written
+                server.run_job(job, None, None, {})
+        finally:
+            server.pipeline.process = saved
+        self.assertNotIn(job["id"], server.JOBS)
+
+    def test_delete_refused_until_final_state_is_written(self):
+        server.JOBS["bbbbbbbbbbbb"] = {"id": "bbbbbbbbbbbb", "status": "done", "result": {}}
+        try:
+            self.assertEqual(self.c.delete("/api/jobs/bbbbbbbbbbbb").status_code, 409)
+        finally:
+            server.JOBS.pop("bbbbbbbbbbbb")
+
+    def test_saved_edits_keep_speaker_labels(self):
+        edited = [dict(SEGS[0], speaker="Alice"), dict(SEGS[1], speaker="Bob")]
+        r = self.c.post(f"/api/jobs/{JOB_ID}/export", json={"fmt": "txt", "segments": edited, "save": True})
+        self.assertEqual(r.text, "Alice: Hello there.\nBob: Bye.\n")
+        job = self.c.get(f"/api/jobs/{JOB_ID}").json()
+        self.assertEqual(job["result"]["transcript_edited"][1]["speaker"], "Bob")
+
+    def test_rejects_bad_speaker_count(self):
+        r = self.c.post("/api/jobs", data={"url": "https://x.test/v", "num_speakers": "99"})
+        self.assertEqual(r.status_code, 400)
+
     def test_interrupted_jobs_marked_on_startup(self):
         d = Path(TMP) / "fedcba987654"
         d.mkdir(exist_ok=True)

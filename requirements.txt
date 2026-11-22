@@ -4,6 +4,7 @@ python-multipart>=0.0.9
 faster-whisper>=1.1
 yt-dlp>=2025.1.1
 anthropic>=0.109
+sherpa-onnx>=2.0  # speaker labels (diarization), CPU ONNX, no PyTorch
 # NVIDIA GPU: CUDA 12 runtime libraries for faster-whisper (ctranslate2); harmless on CPU-only machines
 nvidia-cublas-cu12; sys_platform != "darwin"
 nvidia-cudnn-cu12>=9,<10; sys_platform != "darwin"

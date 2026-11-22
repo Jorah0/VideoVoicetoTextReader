@@ -11,7 +11,8 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SENTENCE = "The quick brown fox jumps over the lazy dog. Speech recognition turns spoken words into written text."
+DIALOG = [("David", "The quick brown fox jumps over the lazy dog."),
+          ("Zira", "Speech recognition turns spoken words into written text.")]
 
 
 class SkipStep(Exception):
@@ -52,15 +53,20 @@ def e2e():
     if sys.platform != "win32":
         raise SkipStep("speech synthesis for the fixture uses Windows SAPI")
     tmp = Path(tempfile.mkdtemp(prefix="vvtr-e2e-"))
-    wav, mp4 = tmp / "speech.wav", tmp / "clip.mp4"
-    ps = (f"Add-Type -AssemblyName System.Speech; $s=New-Object System.Speech.Synthesis.SpeechSynthesizer; "
-          f"$s.Rate=-1; $s.SetOutputToWaveFile('{wav}'); $s.Speak('{SENTENCE}'); $s.Dispose()")
-    sh(["powershell", "-NoProfile", "-Command", ps])
-    # two solid-colour shots (a scene cut at 4s) under the synthesized speech
+    mp4 = tmp / "clip.mp4"
+    wavs = []
+    for i, (voice, line) in enumerate(DIALOG):  # two different voices: the speaker stage must tell them apart
+        wavs.append(tmp / f"line{i}.wav")
+        sh(["powershell", "-NoProfile", "-Command",
+            f"Add-Type -AssemblyName System.Speech; $s=New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+            f"$s.SelectVoice('Microsoft {voice} Desktop'); $s.Rate=-1; $s.SetOutputToWaveFile('{wavs[-1]}'); "
+            f"$s.Speak('{line}'); $s.Dispose()"])
+    # two solid-colour shots (a scene cut at 4s) under the dialogue, a pause between the voices
     sh(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "color=c=red:s=640x360:d=4:r=25",
-        "-f", "lavfi", "-i", "color=c=blue:s=640x360:d=6:r=25", "-i", str(wav),
-        "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0[v]", "-map", "[v]", "-map", "2:a",
-        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-t", "10", str(mp4)])
+        "-f", "lavfi", "-i", "color=c=blue:s=640x360:d=30:r=25", "-i", str(wavs[0]), "-i", str(wavs[1]),
+        "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0[v];[2:a]aresample=16000,apad=pad_dur=1[a0];"
+                           "[3:a]aresample=16000[a1];[a0][a1]concat=n=2:v=0:a=1[a]",
+        "-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", str(mp4)])
 
     os.environ["VVTR_OUTPUT"] = str(tmp / "out")
     sys.path.insert(0, str(ROOT))
@@ -92,11 +98,24 @@ def e2e():
     assert res["visual"]["keyframes"], "no keyframes extracted"
     assert res["stats"]["word_count"] >= 10, res["stats"]
     assert res["audio"]["integrated_lufs"] is not None, res["audio"]
-    assert all(job["stages"][s]["status"] == "done" for s in ("transcribe", "visual_scan", "audio_scan")), job["stages"]
+    assert all(job["stages"][s]["status"] == "done" for s in ("transcribe", "speakers", "visual_scan", "audio_scan")), job["stages"]
+    by_speaker = {}
+    for s in res["transcript"]["segments"]:
+        by_speaker.setdefault(s.get("speaker"), []).append(s["text"].lower())
+    print("    speakers:", by_speaker)
+    assert len(set(by_speaker) - {None}) == 2, f"expected 2 voices, got {by_speaker}"
+    assert any("fox" in t for t in by_speaker.get("Speaker 1", [])) and any("speech" in t for t in by_speaker.get("Speaker 2", [])), by_speaker
+    assert len(res["stats"]["speakers"]) == 2, res["stats"]["speakers"]
     assert c.get(f"/api/jobs/{job_id}/media").status_code == 200
     assert c.get(f"/api/jobs/{job_id}/frames/f_000.jpg").status_code == 200
     out = Path(os.environ["VVTR_OUTPUT"]) / job_id
-    assert "fox" in (out / "transcript.txt").read_text(encoding="utf-8").lower()
+    raw_txt = (out / "transcript.txt").read_text(encoding="utf-8")
+    assert "fox" in raw_txt.lower() and "Speaker 2: " in raw_txt, raw_txt
+    for _ in range(50):  # "done" is visible a moment before the final job.json is written and memory released
+        if job_id not in server.JOBS:
+            break
+        time.sleep(0.1)
+    assert job_id not in server.JOBS, "finished job still held in memory"
     srt = c.post(f"/api/jobs/{job_id}/export", json={"fmt": "srt", "segments": res["transcript"]["segments"]})
     assert srt.status_code == 200 and "-->" in srt.text
     assert c.delete(f"/api/jobs/{job_id}").status_code == 200 and not out.exists()

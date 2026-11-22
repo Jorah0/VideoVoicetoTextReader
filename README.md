@@ -17,10 +17,11 @@ python -m app.server                   # opens http://127.0.0.1:8765
 | Acquire | yt-dlp (URL) or upload | first |
 | Probe | ffprobe: container, codecs, resolution, fps, bitrate | first |
 | Speech → text | faster-whisper (`large-v3` on GPU by default), VAD, auto language detection | **in parallel** |
+| Speakers | sherpa-onnx diarization (pyannote segmentation + NeMo TitaNet, CPU, no token): labels each line Speaker 1, 2, ...; rename or merge them in the editor | **in parallel** |
 | Video scan | ffmpeg scene-cut detection, shot length, keyframes | **in parallel** |
 | Audio scan | EBU R128 loudness, silence detection | **in parallel** |
 | On-screen text | Claude vision reads every keyframe (titles, slides, captions) | after the video scan |
-| Text analysis | words, words per minute, readability, keywords, filler words, pauses, low-confidence lines (no AI) | after transcription |
+| Text analysis | words, words per minute, readability, keywords, filler words, pauses, low-confidence lines, talk time per speaker (no AI) | after transcription |
 | AI review | Claude: language check against Whisper, coherence score, per-line corrections, category, topics, sentiment, entities, chapters, quotes, action items | after analysis |
 | Translate | Claude, any language (Whisper fallback for English without a key) | last |
 
@@ -34,8 +35,9 @@ The model is `claude-opus-5-5` with structured outputs, adaptive thinking and se
 ## Verify
 
 ```
-python scripts/verify.py          # compile + 36 unit/API tests
-python scripts/verify.py --full   # + end-to-end: synthesized speech video -> Whisper on GPU -> API -> export
+python scripts/verify.py          # compile + unit/API tests
+python scripts/verify.py --full   # + end-to-end: two-voice synthesized video -> Whisper on GPU + speakers -> API -> export
 ```
 
-Not included: speaker diarization (who said what). It needs pyannote and a Hugging Face token; add it when you need it.
+The speaker models (~46 MB) download once, on the first job, to `~/.cache/vvtr-models` (`VVTR_MODELS` overrides).
+Long ffmpeg passes time out at 4x the media duration + 10 minutes.

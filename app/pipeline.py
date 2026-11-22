@@ -7,8 +7,8 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from . import ai
-from .analysis import export, text_stats
+from . import ai, speakers
+from .analysis import assign_speakers, export, text_stats
 
 MODELS = ["large-v3", "large-v3-turbo", "distil-large-v3.5", "medium", "small", "base", "tiny"]
 _model_lock = threading.Lock()
@@ -47,7 +47,16 @@ def default_model() -> str:
 
 
 def run(cmd: list[str], timeout: float | None = None) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
+    try:  # on timeout subprocess.run kills the child before raising
+        return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"{Path(cmd[0]).stem} timed out after {timeout:.0f}s (damaged file or stalled decode?)") from None
+
+
+def budget(duration: float) -> float:
+    """Seconds a full-file ffmpeg pass may take. ponytail: 4x real time + 10 min covers slow 4K HEVC decodes on CPU;
+    raise it if long 8K files time out."""
+    return 600 + 4 * duration if duration else 6 * 3600
 
 
 # ---------- ffmpeg output parsers (pure, tested) ----------
@@ -175,11 +184,17 @@ def with_cuda_fallback(work):
         return work()
 
 
-def transcribe(src: Path, job_dir: Path, model_name: str, language: str | None, on_progress) -> dict:
+def extract_audio(src: Path, job_dir: Path, duration: float) -> Path:
+    """16 kHz mono 16-bit wav: what Whisper and the speaker model both read."""
     wav = job_dir / "audio.wav"
-    p = run(["ffmpeg", "-y", "-v", "error", "-i", str(src), "-vn", "-ac", "1", "-ar", "16000", str(wav)])
+    p = run(["ffmpeg", "-y", "-v", "error", "-i", str(src), "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
+             str(wav)], budget(duration))
     if p.returncode:
         raise RuntimeError(f"audio extraction failed: {p.stderr.strip()[:300]}")
+    return wav
+
+
+def transcribe(wav: Path, model_name: str, language: str | None, on_progress) -> dict:
     def work():
         segs, info = get_model(model_name).transcribe(str(wav), language=language or None, vad_filter=True, beam_size=5)
         segments = []
@@ -199,7 +214,8 @@ def transcribe(src: Path, job_dir: Path, model_name: str, language: str | None, 
 
 
 def scan_audio(src: Path, duration: float) -> dict:
-    p = run(["ffmpeg", "-nostats", "-i", str(src), "-vn", "-af", "silencedetect=n=-35dB:d=0.6,ebur128", "-f", "null", "-"])
+    p = run(["ffmpeg", "-nostats", "-i", str(src), "-vn", "-af", "silencedetect=n=-35dB:d=0.6,ebur128", "-f", "null", "-"],
+            budget(duration))
     silences = parse_silence(p.stderr, duration)
     silent = sum(s["end"] - s["start"] for s in silences)
     return {**parse_loudness(p.stderr), "silences": silences[:200], "silence_seconds": round(silent, 2),
@@ -208,7 +224,7 @@ def scan_audio(src: Path, duration: float) -> dict:
 
 def scan_video(src: Path, job_dir: Path, duration: float, on_progress) -> dict:
     p = run(["ffmpeg", "-nostats", "-i", str(src), "-an", "-vf", "scale=320:-2,select='gt(scene,0.35)',showinfo",
-             "-fps_mode", "vfr", "-f", "null", "-"])
+             "-fps_mode", "vfr", "-f", "null", "-"], budget(duration))
     scenes = parse_scenes(p.stderr)
     on_progress(0.6)
     frames_dir = job_dir / "frames"
@@ -217,7 +233,7 @@ def scan_video(src: Path, job_dir: Path, duration: float, on_progress) -> dict:
     for i, t in enumerate(keyframe_times(scenes, duration)):
         out = frames_dir / f"f_{i:03}.jpg"
         r = run(["ffmpeg", "-y", "-v", "error", "-ss", str(t), "-i", str(src), "-frames:v", "1",
-                 "-vf", "scale='min(960,iw)':-2", "-q:v", "3", str(out)])
+                 "-vf", "scale='min(960,iw)':-2", "-q:v", "3", str(out)], 120)
         if r.returncode == 0 and out.exists():
             frames.append({"index": len(frames), "time": t, "file": out.name})
     on_progress(0.99)
@@ -258,14 +274,26 @@ def process(job: dict, update, src: Path | None, url: str | None, opts: dict) ->
                 return None
         return run
 
+    wav = None
+    if meta["audio"]:
+        update("transcribe", "running", 0)
+        wav = extract_audio(src, job_dir, duration)
+
     def t_transcribe():
-        if not meta["audio"]:
+        if not wav:
             update("transcribe", "skipped", 1, note="no audio stream")
             return None
-        update("transcribe", "running", 0)
-        r = transcribe(src, job_dir, opts["model"], opts["language"], lambda p: update("transcribe", progress=p))
+        r = transcribe(wav, opts["model"], opts["language"], lambda p: update("transcribe", progress=p))
         update("transcribe", "done", 1, transcript=r)
         return r
+
+    def t_speakers():
+        if not (wav and opts.get("speakers")):
+            return None
+        update("speakers", "running", 0)
+        turns = speakers.diarize(wav, opts.get("num_speakers") or 0, lambda p: update("speakers", progress=p))
+        update("speakers", "done", 1)  # labels are attached below, once the transcript exists
+        return turns
 
     def t_visual():
         if not meta["video"]:
@@ -291,11 +319,18 @@ def process(job: dict, update, src: Path | None, url: str | None, opts: dict) ->
         update("audio_scan", "done", 1, audio=a)
         return a
 
-    with ThreadPoolExecutor(3) as pool:  # the simultaneous scan: speech, picture and sound in parallel
+    with ThreadPoolExecutor(4) as pool:  # the simultaneous scan: speech, voices, picture and sound in parallel
         fv = pool.submit(guarded("visual_scan", t_visual))
         fa = pool.submit(guarded("audio_scan", t_audio))
+        fs = pool.submit(guarded("speakers", t_speakers))
         transcript = pool.submit(t_transcribe).result()
         fv.result(), fa.result()
+        turns = fs.result() or []
+
+    if transcript and turns:  # a new dict, never mutated in place: the poller may be serialising the old one
+        transcript = {**transcript, "segments": assign_speakers(transcript["segments"], turns)}
+        n = len({s["speaker"] for s in transcript["segments"] if s.get("speaker")})
+        update("speakers", note=f"{n} speaker{'s' * (n != 1)}", transcript=transcript)
 
     segments = transcript["segments"] if transcript else []
     if not duration and segments:  # container without a duration: the speech timeline is the best we have
@@ -323,6 +358,7 @@ def process(job: dict, update, src: Path | None, url: str | None, opts: dict) ->
                 tr = ai.translate(segments, target, lambda p: update("translate", progress=p))
             elif target.lower() in ("en", "english"):
                 tr = whisper_to_english(src, job_dir, opts["model"])
+                tr["segments"] = assign_speakers(tr["segments"], turns)
             else:
                 raise RuntimeError("translation to languages other than English needs the AI layer (ANTHROPIC_API_KEY)")
             (job_dir / "translation.txt").write_text(export(tr["segments"], "txt"), encoding="utf-8")
