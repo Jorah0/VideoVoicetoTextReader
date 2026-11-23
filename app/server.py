@@ -1,8 +1,10 @@
 """HTTP API + UI. Run: python -m app.server   (then open http://127.0.0.1:8765)"""
+import ipaddress
 import json
 import os
 import re
 import shutil
+import socket
 import threading
 import time
 import traceback
@@ -54,6 +56,23 @@ def job_dir(job_id: str) -> Path:
     if not ID_RE.fullmatch(job_id):
         raise HTTPException(404, "no such job")
     return OUT / job_id
+
+
+def private_host(url: str) -> bool:
+    """True if the URL's host resolves to this computer or the local network (loopback, private, link-local, ...).
+    ponytail: best effort, checks the first hop once. Redirects, manifests and embedded players yt-dlp fetches later,
+    and DNS that changes between this check and the download, are not re-checked. Route yt-dlp through a filtering
+    proxy if a hostile URL is ever in the threat model (today only the local user can submit one)."""
+    if "\\" in url:  # parsers disagree on which side of a backslash the host is: refuse to guess
+        return True
+    host = urlparse(url).hostname or ""
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except (OSError, UnicodeError):
+        # shorthand IPs (127.1, 0x7f.0.0.1) fail here but other resolvers accept them; real names fall through to
+        # yt-dlp, which reports the failure the usual way
+        return bool(re.fullmatch(r"[0-9a-fx.]+", host)) and any(c.isdigit() for c in host)
+    return any(not ipaddress.ip_address(str(i[4][0]).split("%")[0]).is_global for i in infos)
 
 
 def snapshot(job: dict) -> dict:
@@ -158,8 +177,16 @@ def create_job(file: UploadFile | None = File(None), url: str = Form(""), model:
     url = url.strip()
     if bool(url) == bool(file and file.filename):
         raise HTTPException(400, "give either a file or a URL")
-    if url and urlparse(url).scheme not in ("http", "https"):
+    try:
+        parsed = urlparse(url)
+        parsed.hostname  # raises on a malformed host such as http://[bad/
+    except ValueError:
+        raise HTTPException(400, "that URL could not be read") from None
+    if url and parsed.scheme not in ("http", "https"):
         raise HTTPException(400, "URL must start with http:// or https://")
+    if url and os.environ.get("VVTR_ALLOW_LAN") != "1" and private_host(url):
+        raise HTTPException(400, "URL points at this computer or your local network (or your DNS/VPN answered with a "
+                                 "private address); set VVTR_ALLOW_LAN=1 before starting the app to allow it")
     if model and model not in pipeline.MODELS:
         raise HTTPException(400, f"unknown model; choose one of {pipeline.MODELS}")
     if language and not re.fullmatch(r"[a-z]{2,3}", language):

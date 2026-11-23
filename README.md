@@ -41,3 +41,5 @@ python scripts/verify.py --full   # + end-to-end: two-voice synthesized video ->
 
 The speaker models (~46 MB) download once, on the first job, to `~/.cache/vvtr-models` (`VVTR_MODELS` overrides).
 Long ffmpeg passes time out at 4x the media duration + 10 minutes.
+URLs that resolve to this computer or your local network are refused; set `VVTR_ALLOW_LAN=1` to transcribe from a
+NAS or media server on your LAN.

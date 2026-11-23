@@ -34,6 +34,33 @@ class Api(unittest.TestCase):
         r = self.c.post("/api/jobs", data={"url": "file:///etc/passwd"})
         self.assertEqual(r.status_code, 400)
 
+    def test_rejects_urls_into_this_computer_or_the_lan(self):
+        for url in ("http://localhost:8765/api/jobs", "http://127.0.0.1/x.mp4", "http://192.168.1.10/v.mp4",
+                    "http://[::1]/v", "http://0.0.0.0/v", "http://169.254.169.254/latest",
+                    "http://[::ffff:127.0.0.1]/v", "http://127.1/v", "http://0x7f.0.0.1/v", "http://127.0.0.1\\@x.com/v"):
+            r = self.c.post("/api/jobs", data={"url": url})
+            self.assertEqual(r.status_code, 400, url)
+            self.assertIn("local network", r.json()["detail"], url)
+        self.assertFalse(server.private_host("https://93.184.216.34/v"))  # a public address
+        self.assertFalse(server.private_host("https://no-such-host.invalid/v"))  # unresolvable: yt-dlp reports it
+
+    def test_lan_urls_allowed_when_opted_in(self):
+        os.environ["VVTR_ALLOW_LAN"] = "1"
+        try:  # gets past the LAN check and stops at the next one, so no job starts
+            r = self.c.post("/api/jobs", data={"url": "http://127.0.0.1/x.mp4", "model": "gpt"})
+        finally:
+            del os.environ["VVTR_ALLOW_LAN"]
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("unknown model", r.json()["detail"])
+        os.environ["VVTR_ALLOW_LAN"] = "0"  # "0" means no, not "set"
+        try:
+            self.assertEqual(self.c.post("/api/jobs", data={"url": "http://127.0.0.1/x"}).status_code, 400)
+        finally:
+            del os.environ["VVTR_ALLOW_LAN"]
+
+    def test_malformed_url_is_a_400_not_a_crash(self):
+        self.assertEqual(self.c.post("/api/jobs", data={"url": "http://[bad/"}).status_code, 400)
+
     def test_rejects_missing_source(self):
         self.assertEqual(self.c.post("/api/jobs", data={"url": ""}).status_code, 400)
 
